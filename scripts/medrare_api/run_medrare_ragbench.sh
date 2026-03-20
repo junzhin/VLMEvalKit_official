@@ -31,7 +31,7 @@ fi
 # ================================================================
 OUTPUT_DIR="output"
 JUDGE_MODEL="qwen3vl"
-API_NPROC=32
+API_NPROC=64
 CLEAN_CACHE=0
 DISABLE_BERTSCORE=1
 

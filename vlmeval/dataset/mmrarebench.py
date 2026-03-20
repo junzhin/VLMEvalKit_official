@@ -28,7 +28,7 @@ from ..smp import *
 from ..utils import track_progress_rich
 from ..smp.file import LMUDataRoot, get_intermediate_file_path
 
-# Track configuration
+
 TRACK_CONFIG = {
     'MMRarebench_Diagnosis': {
         'track': 'diagnosis',
@@ -51,7 +51,6 @@ TRACK_CONFIG = {
 BENCH_ROOT = os.environ.get('MMRAREBENCH_ROOT', 'MMRarebench_released_ver1')
 
 
-# Shared utility functions
 def parse_json_list(val):
     if isinstance(val, list):
         return val
@@ -253,7 +252,7 @@ class MMRarebenchOpenEndedBase(MMRarebenchBase):
         return 0.0
 
     def _fallback_evaluate(self, eval_file):
-        """子串匹配回退评测"""
+        """Substring match fallback evaluation."""
         data = load(eval_file)
         assert 'answer' in data.columns and 'prediction' in data.columns
         data['prediction'] = [str(x) for x in data['prediction']]
@@ -274,9 +273,8 @@ class MMRarebenchOpenEndedBase(MMRarebenchBase):
         return results
 
 
-# ── Track 1: Diagnosis (Open-Ended VQA) ──────────────────
 class MMRarebenchDiagnosis(MMRarebenchOpenEndedBase, ImageVQADataset):
-    """Diagnosis Track: 无选项，自由诊断 (Judge + F1)"""
+    """Diagnosis Track: Open-ended free-form diagnosis (Judge + F1)."""
 
     TYPE = 'VQA'
     DATASET_URL = {k: None for k in TRACK_CONFIG if 'Diagnosis' in k}
@@ -298,22 +296,22 @@ class MMRarebenchDiagnosis(MMRarebenchOpenEndedBase, ImageVQADataset):
         )
 
     def evaluate(self, eval_file, **judge_kwargs):
-        """Diagnosis 评测: Judge Score (3维 YES/NO 加权) + token-level F1"""
+        """Diagnosis evaluation: Judge Score (3-dim YES/NO weighted) + token-level F1."""
         model_name = judge_kwargs.get('model', 'exact_matching')
         if model_name == 'exact_matching':
             warnings.warn(
-                f'{self.dataset_name}: 开放式问答需要 Judge Model 评测, '
-                f'请指定 --judge model_name. 当前回退到 F1.'
+                f'{self.dataset_name}: Open-ended QA requires Judge Model. '
+                f'Please specify --judge model_name. Falling back to F1.'
             )
             return self._eval_f1_only(eval_file)
 
         judge_model = build_judge(**judge_kwargs)
         if not judge_model.working():
-            warnings.warn('Judge API 不可用，回退到 F1')
+            warnings.warn('Judge API unavailable, falling back to F1.')
             return self._eval_f1_only(eval_file)
 
         data = load(eval_file)
-        assert 'prediction' in data.columns, '缺少 prediction 列'
+        assert 'prediction' in data.columns, 'Missing prediction column'
         data['prediction'] = [str(x) for x in data['prediction']]
         meta = self.data
 
@@ -321,13 +319,11 @@ class MMRarebenchDiagnosis(MMRarebenchOpenEndedBase, ImageVQADataset):
         f1_scores = []
         judge_prompts = []
 
-        # Phase 1: 计算 F1 + 构建 Judge Prompt
         for _, row in data.iterrows():
             pred = str(row['prediction']).strip()
             idx = str(row['index'])
             meta_row = meta[meta['index'].astype(str) == idx].iloc[0]
 
-            # gold: answer + answer_aliases (TSV maps answer_text -> answer)
             gold_list = [str(meta_row['answer'])]
             aliases = parse_json_list(meta_row.get('answer_aliases', ''))
             if aliases:
@@ -339,7 +335,6 @@ class MMRarebenchDiagnosis(MMRarebenchOpenEndedBase, ImageVQADataset):
             prompt = self._build_judge_prompt(row, pred, reference, gold_list)
             judge_prompts.append(prompt)
 
-        # Phase 2: 并行 Judge
         def _judge_call(model, prompt):
             try:
                 response = model.generate(prompt)
@@ -357,7 +352,6 @@ class MMRarebenchDiagnosis(MMRarebenchOpenEndedBase, ImageVQADataset):
         data['f1'] = f1_scores
         data['judge_score'] = judge_scores
 
-        # Phase 3: 汇总
         results = {
             'diagnosis_judge_score': np.mean(judge_scores) if judge_scores else 0.0,
             'diagnosis_f1': np.mean(f1_scores) * 100,
@@ -369,7 +363,7 @@ class MMRarebenchDiagnosis(MMRarebenchOpenEndedBase, ImageVQADataset):
         return results
 
     def _eval_f1_only(self, eval_file):
-        """无 Judge 时的回退: 仅计算 token-level F1"""
+        """Fallback when no Judge: compute token-level F1 only."""
         data = load(eval_file)
         data['prediction'] = [str(x) for x in data['prediction']]
         meta = self.data
@@ -396,7 +390,7 @@ class MMRarebenchDiagnosis(MMRarebenchOpenEndedBase, ImageVQADataset):
         return results
 
     def _build_judge_prompt(self, row, pred, reference, gold_list):
-        """构建 Diagnosis Judge Prompt (3维度 YES/NO, 聚焦诊断准确性)"""
+        """Build Diagnosis Judge Prompt (3-dim YES/NO, focus on diagnostic accuracy)."""
         correct_diagnosis = gold_list[0] if gold_list else reference
         aliases = gold_list[1:] if len(gold_list) > 1 else []
 
@@ -436,10 +430,10 @@ class MMRarebenchDiagnosis(MMRarebenchOpenEndedBase, ImageVQADataset):
         return prompt
 
     def _parse_judge_score(self, response):
-        """解析 3维度 YES/NO 评分，加权归一化到 [0, 1]
+        """Parse 3-dim YES/NO score, weighted normalization to [0, 1].
 
-        权重: dim1(精确匹配)=3, dim2(类别正确)=1, dim3(具体程度)=1, 总权重=5
-        级联: dim1=NO → 总分上限 0.2
+        Weights: dim1(exact match)=3, dim2(category correct)=1, dim3(specificity)=1, total=5.
+        Cascade: dim1=NO caps total score at 0.2.
         """
         import re
         text = str(response).strip().lower()
@@ -448,7 +442,7 @@ class MMRarebenchDiagnosis(MMRarebenchOpenEndedBase, ImageVQADataset):
         if len(answers) >= 3:
             dims = [1 if a == 'yes' else 0 for a in answers[:3]]
             if dims[0] == 0:
-                return (dims[1] + dims[2]) / 10.0  # 最高 0.2
+                return (dims[1] + dims[2]) / 10.0
             return (3 * dims[0] + dims[1] + dims[2]) / 5.0
 
         m = re.search(r'(\d+(?:\.\d+)?)\s*/\s*(\d+)', text)
@@ -458,9 +452,8 @@ class MMRarebenchDiagnosis(MMRarebenchOpenEndedBase, ImageVQADataset):
         return 0.0
 
 
-# ── Track 2: Treatment (VQA) ──────────────────────────────
 class MMRarebenchTreatment(MMRarebenchOpenEndedBase, ImageVQADataset):
-    """Treatment Track: Rubric 评分 + Judge 判断"""
+    """Treatment Track: Rubric scoring + Judge evaluation."""
 
     TYPE = 'VQA'
     DATASET_URL = {k: None for k in TRACK_CONFIG if 'Treatment' in k}
@@ -481,22 +474,22 @@ class MMRarebenchTreatment(MMRarebenchOpenEndedBase, ImageVQADataset):
         )
 
     def evaluate(self, eval_file, **judge_kwargs):
-        """Treatment Track 评测: Judge Score (6维 YES/NO)"""
+        """Treatment Track evaluation: Judge Score (6-dim YES/NO)."""
         model_name = judge_kwargs.get('model', 'exact_matching')
         if model_name == 'exact_matching':
             warnings.warn(
-                f'{self.dataset_name}: 开放式问答需要 Judge Model 评测, '
-                f'请指定 --judge model_name. 当前回退到子串匹配.'
+                f'{self.dataset_name}: Open-ended QA requires Judge Model. '
+                f'Please specify --judge model_name. Falling back to substring matching.'
             )
             return self._fallback_evaluate(eval_file)
 
         judge_model = build_judge(**judge_kwargs)
         if not judge_model.working():
-            warnings.warn('Judge API 不可用，使用子串匹配回退')
+            warnings.warn('Judge API unavailable, falling back to substring matching.')
             return self._fallback_evaluate(eval_file)
 
         data = load(eval_file)
-        assert 'prediction' in data.columns, '缺少 prediction 列'
+        assert 'prediction' in data.columns, 'Missing prediction column'
         data['prediction'] = [str(x) for x in data['prediction']]
 
         nproc = judge_kwargs.pop('nproc', 4)
@@ -536,7 +529,7 @@ class MMRarebenchTreatment(MMRarebenchOpenEndedBase, ImageVQADataset):
         return results
 
     def _build_judge_prompt(self, row, pred, must_include, must_not, reference):
-        """构建 Treatment Track Judge Prompt (Yes/No 多维度，最严格标准)"""
+        """Build Treatment Track Judge Prompt (Yes/No multi-dim, strictest standard)."""
         prompt = (
             'You are an extremely strict medical expert evaluator conducting a rigorous peer review. '
             'Your standard is that of a senior attending physician reviewing a resident\'s treatment plan. '
@@ -575,9 +568,8 @@ class MMRarebenchTreatment(MMRarebenchOpenEndedBase, ImageVQADataset):
         return prompt
 
 
-# ── Track 3: Crossmodal (VQA) ──────────────────────────────
 class MMRarebenchCrossmodal(MMRarebenchOpenEndedBase, ImageVQADataset):
-    """Crossmodal Track: 跨模态证据关联"""
+    """Crossmodal Track: Cross-modal evidence correlation."""
 
     TYPE = 'VQA'
     DATASET_URL = {k: None for k in TRACK_CONFIG if 'Crossmodal' in k}
@@ -598,28 +590,27 @@ class MMRarebenchCrossmodal(MMRarebenchOpenEndedBase, ImageVQADataset):
         )
 
     def evaluate(self, eval_file, **judge_kwargs):
-        """Crossmodal Track 评测: Judge Score (5维 YES/NO)"""
+        """Crossmodal Track evaluation: Judge Score (5-dim YES/NO)."""
         model_name = judge_kwargs.get('model', 'exact_matching')
         if model_name == 'exact_matching':
             warnings.warn(
-                f'{self.dataset_name}: 开放式问答需要 Judge Model 评测, '
-                f'请指定 --judge model_name. 当前回退到子串匹配.'
+                f'{self.dataset_name}: Open-ended QA requires Judge Model. '
+                f'Please specify --judge model_name. Falling back to substring matching.'
             )
             return self._fallback_evaluate(eval_file)
 
         judge_model = build_judge(**judge_kwargs)
         if not judge_model.working():
-            warnings.warn('Judge API 不可用，使用子串匹配回退')
+            warnings.warn('Judge API unavailable, falling back to substring matching.')
             return self._fallback_evaluate(eval_file)
 
         data = load(eval_file)
-        assert 'prediction' in data.columns, '缺少 prediction 列'
+        assert 'prediction' in data.columns, 'Missing prediction column'
         data['prediction'] = [str(x) for x in data['prediction']]
 
         nproc = judge_kwargs.pop('nproc', 4)
         judge_prompts = []
 
-        # Phase 1: 构建 Judge Prompt
         for _, row in data.iterrows():
             pred = row['prediction']
 
@@ -632,7 +623,6 @@ class MMRarebenchCrossmodal(MMRarebenchOpenEndedBase, ImageVQADataset):
             prompt = self._build_judge_prompt(row, pred, mainline, rel_type, reference)
             judge_prompts.append(prompt)
 
-        # Phase 2: 并行 Judge
         def _judge_call(model, prompt):
             try:
                 response = model.generate(prompt)
@@ -659,7 +649,7 @@ class MMRarebenchCrossmodal(MMRarebenchOpenEndedBase, ImageVQADataset):
         return results
 
     def _build_judge_prompt(self, row, pred, mainline, rel_type, reference):
-        """构建 Crossmodal Track Judge Prompt (Yes/No 多维度，最严格标准)"""
+        """Build Crossmodal Track Judge Prompt (Yes/No multi-dim, strictest standard)."""
         prompt = (
             'You are an extremely strict medical expert evaluator conducting a rigorous peer review. '
             'Your standard is that of a senior radiologist reviewing cross-modal imaging interpretations. '
@@ -696,9 +686,8 @@ class MMRarebenchCrossmodal(MMRarebenchOpenEndedBase, ImageVQADataset):
         return prompt
 
 
-# ── Track 4: Examination (VQA) ──────────────────────────────
 class MMRarebenchExamination(MMRarebenchOpenEndedBase, ImageVQADataset):
-    """Examination Track: 检查方案评估"""
+    """Examination Track: Diagnostic workup evaluation."""
 
     TYPE = 'VQA'
     DATASET_URL = {k: None for k in TRACK_CONFIG if 'Examination' in k}
@@ -729,28 +718,27 @@ class MMRarebenchExamination(MMRarebenchOpenEndedBase, ImageVQADataset):
         return msgs
 
     def evaluate(self, eval_file, **judge_kwargs):
-        """Examination Track 评测: Judge Score (8维 0-1-2)"""
+        """Examination Track evaluation: Judge Score (8-dim 0-1-2 scale)."""
         model_name = judge_kwargs.get('model', 'exact_matching')
         if model_name == 'exact_matching':
             warnings.warn(
-                f'{self.dataset_name}: 开放式问答需要 Judge Model 评测, '
-                f'请指定 --judge model_name. 当前回退到子串匹配.'
+                f'{self.dataset_name}: Open-ended QA requires Judge Model. '
+                f'Please specify --judge model_name. Falling back to substring matching.'
             )
             return self._fallback_evaluate(eval_file)
 
         judge_model = build_judge(**judge_kwargs)
         if not judge_model.working():
-            warnings.warn('Judge API 不可用，使用子串匹配回退')
+            warnings.warn('Judge API unavailable, falling back to substring matching.')
             return self._fallback_evaluate(eval_file)
 
         data = load(eval_file)
-        assert 'prediction' in data.columns, '缺少 prediction 列'
+        assert 'prediction' in data.columns, 'Missing prediction column'
         data['prediction'] = [str(x) for x in data['prediction']]
 
         nproc = judge_kwargs.pop('nproc', 4)
         judge_prompts = []
 
-        # Phase 1: 构建 Judge Prompt
         for _, row in data.iterrows():
             pred = row['prediction']
 
@@ -761,7 +749,6 @@ class MMRarebenchExamination(MMRarebenchOpenEndedBase, ImageVQADataset):
             prompt = self._build_judge_prompt(row, pred, key_tests, must_not, red_flags, reference)
             judge_prompts.append(prompt)
 
-        # Phase 2: 并行 Judge
         def _judge_call(model, prompt):
             try:
                 response = model.generate(prompt)
@@ -856,7 +843,7 @@ class MMRarebenchExamination(MMRarebenchOpenEndedBase, ImageVQADataset):
 
         scores = [int(x) for x in re.findall(r'\b([012])\b', text)]
         if len(scores) >= 8:
-            final = sum(scores[:8]) / 16.0  # 满分 8×2=16
+            final = sum(scores[:8]) / 16.0
             print(f'[DEBUG Exam] scores={scores[:8]} -> {final:.3f} | raw={text[:200]}')
             return final
 
